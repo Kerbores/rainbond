@@ -20,12 +20,14 @@ package model
 
 import (
 	//"github.com/Sirupsen/logrus"
+	"io/ioutil"
+	"net/http"
+
 	"github.com/coreos/etcd/mvcc/mvccpb"
+	"github.com/goodrain/rainbond/node/utils"
 	"github.com/pquerna/ffjson/ffjson"
 	"k8s.io/client-go/pkg/api/v1"
-	"net/http"
-	"io/ioutil"
-	"github.com/goodrain/rainbond/node/utils"
+
 	//"github.com/Sirupsen/logrus"
 	"fmt"
 	url2 "net/url"
@@ -41,16 +43,6 @@ type NodePodResource struct {
 	AllocatedResources `json:"allocatedresources"`
 	Resource           `json:"allocatable"`
 }
-type InitStatus struct {
-	Status   int    `json:"status"`
-	StatusCN string `json:"cn"`
-	HostID   string `json:"uuid"`
-}
-type InstallStatus struct {
-	Status   int           `json:"status"`
-	StatusCN string        `json:"cn"`
-	Tasks    []*ExecedTask `json:"tasks"`
-}
 type AllocatedResources struct {
 	CPURequests     int64
 	CPULimits       int64
@@ -61,6 +53,17 @@ type AllocatedResources struct {
 	CPURequestsR    string
 	CPULimitsR      string
 }
+type InitStatus struct {
+	Status   int    `json:"status"`
+	StatusCN string `json:"cn"`
+	HostID   string `json:"uuid"`
+}
+type InstallStatus struct {
+	Status   int           `json:"status"`
+	StatusCN string        `json:"cn"`
+	Tasks    []*ExecedTask `json:"tasks"`
+}
+
 type ExecedTask struct {
 	ID             string   `json:"id"`
 	Seq            int      `json:"seq"`
@@ -179,16 +182,26 @@ func DoRequest(baseAPI, query, queryType, method string, body []byte) ([]byte, i
 	return data, resp.StatusCode, nil
 }
 
-//Resource 资源
+//ClusterResource 资源
 type ClusterResource struct {
-	Node    int      `json:"node"`
-	Tenant  int      `json:"tenant"`
-	CapCpu  int      `json:"cap_cpu"`
-	CapMem  int      `json:"cap_mem"`
-	ReqCpu  float32  `json:"req_cpu"`
-	ReqMem  int      `json:"req_mem"`
-	CapDisk uint64   `json:"cap_disk"`
-	ReqDisk uint64   `json:"req_disk"`
+	AllNode      int     `json:"all_node"`
+	NotReadyNode int     `json:"notready_node"`
+	ComputeNode  int     `json:"compute_node"`
+	Tenant       int     `json:"tenant"`
+	CapCPU       int     `json:"cap_cpu"`
+	CapMem       int     `json:"cap_mem"`
+	ReqCPU       float32 `json:"req_cpu"`
+	ReqMem       int     `json:"req_mem"`
+	CapDisk      uint64  `json:"cap_disk"`
+	ReqDisk      uint64  `json:"req_disk"`
+}
+
+//node 资源
+type NodeResource struct {
+	CapCPU int     `json:"cap_cpu"`
+	CapMem int     `json:"cap_mem"`
+	ReqCPU float32 `json:"req_cpu"`
+	ReqMem int     `json:"req_mem"`
 }
 
 type FirstConfig struct {
@@ -403,19 +416,19 @@ type ResponseBody struct {
 	Body  Body   `json:"body,omitempty"`
 }
 type Pods struct {
-	Namespace       string          `json:"namespace"`
-	Id              string          `json:"id"`
-	Name            string          `json:"name"`
-	TenantName      string          `json:"tenant_name"`
-	CPURequests     string          `json:"cpurequest"`
-	CPURequestsR    string          `json:"cpurequestr"`
-	CPULimits       string          `json:"cpulimits"`
-	CPULimitsR      string          `json:"cpulimitsr"`
-	MemoryRequests  string          `json:"memoryrequests"`
-	MemoryRequestsR string          `json:"memoryrequestsr"`
-	MemoryLimits    string          `json:"memorylimits"`
-	MemoryLimitsR   string          `json:"memorylimitsr"`
-	Status          ConditionStatus `json:"status"`
+	Namespace       string `json:"namespace"`
+	Id              string `json:"id"`
+	Name            string `json:"name"`
+	TenantName      string `json:"tenant_name"`
+	CPURequests     string `json:"cpurequest"`
+	CPURequestsR    string `json:"cpurequestr"`
+	CPULimits       string `json:"cpulimits"`
+	CPULimitsR      string `json:"cpulimitsr"`
+	MemoryRequests  string `json:"memoryrequests"`
+	MemoryRequestsR string `json:"memoryrequestsr"`
+	MemoryLimits    string `json:"memorylimits"`
+	MemoryLimitsR   string `json:"memorylimitsr"`
+	Status          string `json:"status"`
 }
 
 //NodeDetails NodeDetails
@@ -435,4 +448,41 @@ type NodeDetails struct {
 	NonterminatedPods  []*Pods             `json:"nonterminatedpods"`
 	AllocatedResources map[string]string   `json:"allocatedresources"`
 	Events             map[string][]string `json:"events"`
+}
+
+type AlertingRulesConfig struct {
+	Groups []*AlertingNameConfig `yaml:"groups" json:"groups"`
+}
+
+type AlertingNameConfig struct {
+	Name  string         `yaml:"name" json:"name"`
+	Rules []*RulesConfig `yaml:"rules" json:"rules"`
+}
+
+type RulesConfig struct {
+	Alert       string            `yaml:"alert" json:"alert"`
+	Expr        string            `yaml:"expr" json:"expr"`
+	For         string            `yaml:"for" json:"for"`
+	Labels      map[string]string `yaml:"labels" json:"labels"`
+	Annotations map[string]string `yaml:"annotations" json:"annotations"`
+}
+
+//NotificationEvent NotificationEvent
+type NotificationEvent struct {
+	//Kind could be service, tenant, cluster, node
+	Kind string `json:"Kind"`
+	//KindID could be service_id,tenant_id,cluster_id,node_id
+	KindID string `json:"KindID"`
+	Hash   string `json:"Hash"`
+	//Type could be Normal UnNormal Notification
+	Type          string `json:"Type"`
+	Message       string `json:"Message"`
+	Reason        string `json:"Reason"`
+	Count         int    `json:"Count"`
+	LastTime      string `json:"LastTime"`
+	FirstTime     string `json:"FirstTime"`
+	IsHandle      bool   `json:"IsHandle"`
+	HandleMessage string `json:"HandleMessage"`
+	ServiceName   string `json:"ServiceName"`
+	TenantName    string `json:"TenantName"`
 }

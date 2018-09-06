@@ -20,6 +20,8 @@ package monitor
 
 import (
 	"context"
+	"time"
+
 	"github.com/Sirupsen/logrus"
 	v3 "github.com/coreos/etcd/clientv3"
 	"github.com/goodrain/rainbond/cmd/monitor/option"
@@ -30,7 +32,6 @@ import (
 	"github.com/goodrain/rainbond/monitor/prometheus"
 	"github.com/goodrain/rainbond/util/watch"
 	"github.com/tidwall/gjson"
-	"time"
 )
 
 type Monitor struct {
@@ -49,12 +50,18 @@ func (d *Monitor) Start() {
 	d.discoverv1.AddProject("event_log_event_http", &callback.EventLog{Prometheus: d.manager})
 	d.discoverv1.AddProject("acp_entrance", &callback.Entrance{Prometheus: d.manager})
 	d.discoverv2.AddProject("app_sync_runtime_server", &callback.AppStatus{Prometheus: d.manager})
+	d.discoverv2.AddProject("builder", &callback.Builder{Prometheus: d.manager})
+	d.discoverv2.AddProject("acp_webcli", &callback.Webcli{Prometheus: d.manager})
+	d.discoverv2.AddProject("mq", &callback.Mq{Prometheus: d.manager})
 
 	// node and app runtime metrics needs to be monitored separately
 	go d.discoverNodes(&callback.Node{Prometheus: d.manager}, &callback.App{Prometheus: d.manager}, d.ctx.Done())
 
 	// monitor etcd members
 	go d.discoverEtcd(&callback.Etcd{Prometheus: d.manager}, d.ctx.Done())
+
+	// monitor Cadvisor
+	go d.discoverCadvisor(&callback.Cadvisor{Prometheus: d.manager}, d.ctx.Done())
 }
 
 func (d *Monitor) discoverNodes(node *callback.Node, app *callback.App, done <-chan struct{}) {
@@ -96,6 +103,55 @@ func (d *Monitor) discoverNodes(node *callback.Node, app *callback.App, done <-c
 				isSlave := gjson.Get(event.GetValueString(), "labels.rainbond_node_rule_compute").String()
 				if isSlave == "true" {
 					app.Delete(&event)
+				}
+			case watch.Error:
+				logrus.Error("error when read a event from result chan for discover all nodes: ", event.Error)
+			}
+		case <-done:
+			logrus.Info("stop discover nodes because received stop signal.")
+			return
+		}
+
+	}
+
+}
+
+func (d *Monitor) discoverCadvisor(c *callback.Cadvisor, done <-chan struct{}) {
+	// start listen node modified
+	watcher := watch.New(d.client, "")
+	w, err := watcher.WatchList(d.ctx, "/rainbond/nodes", "")
+	if err != nil {
+		logrus.Error("failed to watch list for discover all nodes: ", err)
+		return
+	}
+	defer w.Stop()
+
+	for {
+		select {
+		case event, ok := <-w.ResultChan():
+			if !ok {
+				logrus.Warn("the events channel is closed.")
+				return
+			}
+
+			switch event.Type {
+			case watch.Added:
+
+				isSlave := gjson.Get(event.GetValueString(), "labels.rainbond_node_rule_compute").String()
+				if isSlave == "true" {
+					c.Add(&event)
+				}
+			case watch.Modified:
+
+				isSlave := gjson.Get(event.GetValueString(), "labels.rainbond_node_rule_compute").String()
+				if isSlave == "true" {
+					c.Modify(&event)
+				}
+			case watch.Deleted:
+
+				isSlave := gjson.Get(event.GetValueString(), "labels.rainbond_node_rule_compute").String()
+				if isSlave == "true" {
+					c.Delete(&event)
 				}
 			case watch.Error:
 				logrus.Error("error when read a event from result chan for discover all nodes: ", event.Error)

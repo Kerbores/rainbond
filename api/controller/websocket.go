@@ -36,7 +36,7 @@ type DockerConsole struct {
 }
 
 var defaultDockerConsoleEndpoints = []string{"127.0.0.1:7171"}
-var defaultEventLogEndpoints = []string{"127.0.0.1:6363"}
+var defaultEventLogEndpoints = []string{"local=>127.0.0.1:6363"}
 var defaultEtcdEndpoints = []string{"127.0.0.1:2379"}
 
 var dockerConsole *DockerConsole
@@ -163,4 +163,16 @@ func (d LogFile) Get(w http.ResponseWriter, r *http.Request) {
 func isExist(filename string) bool {
 	_, err := os.Stat(filename)
 	return err == nil || os.IsExist(err)
+}
+
+
+//Get get
+func (d LogFile) GetInstallLog(w http.ResponseWriter, r *http.Request) {
+	filename := chi.URLParam(r, "filename")
+	filePath := d.Root + filename
+	if isExist(filePath) {
+		http.ServeFile(w, r, filePath)
+	} else {
+		w.WriteHeader(404)
+	}
 }

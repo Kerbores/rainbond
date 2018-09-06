@@ -24,33 +24,49 @@ import (
 
 	"sort"
 	"strconv"
-	"strings"
+
+	"os"
+	"os/exec"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/goodrain/rainbond/cmd/node/option"
 	"github.com/goodrain/rainbond/node/api/model"
-	"github.com/goodrain/rainbond/node/core/k8s"
+	"github.com/goodrain/rainbond/node/kubecache"
 	"github.com/goodrain/rainbond/node/masterserver/node"
+	"github.com/goodrain/rainbond/node/nodem/client"
 	"github.com/goodrain/rainbond/node/utils"
 	"github.com/twinj/uuid"
+)
+
+const (
+	Running     = "running"
+	Offline     = "offline"
+	Unknown     = "unknown"
+	Error       = "error"
+	Init        = "init"
+	InitSuccess = "init_success"
+	InitFailed  = "init_failed"
+	Installing  = "installing"
 )
 
 //NodeService node service
 type NodeService struct {
 	c           *option.Conf
 	nodecluster *node.Cluster
+	kubecli     kubecache.KubeClient
 }
 
 //CreateNodeService create
-func CreateNodeService(c *option.Conf, nodecluster *node.Cluster) *NodeService {
+func CreateNodeService(c *option.Conf, nodecluster *node.Cluster, kubecli kubecache.KubeClient) *NodeService {
 	return &NodeService{
 		c:           c,
 		nodecluster: nodecluster,
+		kubecli:     kubecli,
 	}
 }
 
 //AddNode add node
-func (n *NodeService) AddNode(node *model.APIHostNode) *utils.APIHandleError {
+func (n *NodeService) AddNode(node *client.APIHostNode) *utils.APIHandleError {
 	if n.nodecluster == nil {
 		return utils.CreateAPIHandleError(400, fmt.Errorf("this node can not support this api"))
 	}
@@ -60,20 +76,43 @@ func (n *NodeService) AddNode(node *model.APIHostNode) *utils.APIHandleError {
 	if node.InternalIP == "" {
 		return utils.CreateAPIHandleError(400, fmt.Errorf("node internal ip can not be empty"))
 	}
+	if node.HostName == "" {
+		return utils.CreateAPIHandleError(400, fmt.Errorf("node hostname can not be empty"))
+	}
+
+	if node.RootPass != "" && node.Privatekey != "" {
+		return utils.CreateAPIHandleError(400, fmt.Errorf("Options private-key and root-pass are conflicting"))
+	}
 	existNode := n.nodecluster.GetAllNode()
 	for _, en := range existNode {
 		if node.InternalIP == en.InternalIP {
 			return utils.CreateAPIHandleError(400, fmt.Errorf("node internal ip %s is exist", node.InternalIP))
 		}
 	}
-	rbnode := node.Clone()
-	rbnode.CreateTime = time.Now()
-	rbnode.Conditions = make([]model.NodeCondition, 0)
-	if _, err := rbnode.Update(); err != nil {
-		return utils.CreateAPIHandleErrorFromDBError("save node", err)
+	linkModel := "pass"
+	if node.Privatekey != "" {
+		linkModel = "key"
 	}
-	//Determine if the node needs to be installed.
-	n.nodecluster.CheckNodeInstall(rbnode)
+
+	// start add node script
+	logrus.Info("Begin add node, please don't exit")
+	line := fmt.Sprintf("cd /opt/rainbond/install/scripts; ./%s.sh %s %s %s %s %s", node.Role, node.HostName,
+		node.InternalIP, linkModel, node.RootPass, node.Privatekey)
+	go func() {
+		fileName := node.HostName + ".log"
+		cmd := exec.Command("bash", "-c", line)
+		f, _ := os.OpenFile("/grdata/downloads/log/"+fileName, os.O_WRONLY|os.O_CREATE|os.O_SYNC, 0755)
+		cmd.Stdout = f
+		cmd.Stderr = f
+		err := cmd.Run()
+
+		if err != nil {
+			logrus.Errorf("Error executing shell script,View log file：/grdata/downloads/log/" + fileName)
+			return
+		}
+		logrus.Info("Add node successful")
+		logrus.Info("check cluster status: grctl node list")
+	}()
 	return nil
 }
 
@@ -84,12 +123,11 @@ func (n *NodeService) DeleteNode(nodeID string) *utils.APIHandleError {
 	if node.Alived {
 		return utils.CreateAPIHandleError(400, fmt.Errorf("node is online, can not delete"))
 	}
-	//TODO:compute node check node is offline
-	if node.Role.HasRule(model.ComputeNode) {
-		if node.NodeStatus != nil {
-			return utils.CreateAPIHandleError(400, fmt.Errorf("node is k8s compute node, can not delete"))
-		}
+	// TODO:compute node check node is offline
+	if node.NodeStatus.Status != "offline" {
+		return utils.CreateAPIHandleError(401, fmt.Errorf("node is not offline"))
 	}
+	n.nodecluster.RemoveNode(node.ID)
 	_, err := node.DeleteNode()
 	if err != nil {
 		return utils.CreateAPIHandleErrorFromDBError("delete node", err)
@@ -98,7 +136,7 @@ func (n *NodeService) DeleteNode(nodeID string) *utils.APIHandleError {
 }
 
 //GetNode get node info
-func (n *NodeService) GetNode(nodeID string) (*model.HostNode, *utils.APIHandleError) {
+func (n *NodeService) GetNode(nodeID string) (*client.HostNode, *utils.APIHandleError) {
 	node := n.nodecluster.GetNode(nodeID)
 	if node == nil {
 		return nil, utils.CreateAPIHandleError(404, fmt.Errorf("node no found"))
@@ -107,14 +145,36 @@ func (n *NodeService) GetNode(nodeID string) (*model.HostNode, *utils.APIHandleE
 }
 
 //GetAllNode get all node
-func (n *NodeService) GetAllNode() ([]*model.HostNode, *utils.APIHandleError) {
+func (n *NodeService) GetAllNode() ([]*client.HostNode, *utils.APIHandleError) {
 	if n.nodecluster == nil {
 		return nil, utils.CreateAPIHandleError(400, fmt.Errorf("this node can not support this api"))
 	}
 
 	nodes := n.nodecluster.GetAllNode()
-	sort.Sort(model.NodeList(nodes))
+	sort.Sort(client.NodeList(nodes))
 	return nodes, nil
+}
+
+func (n *NodeService) GetServicesHealthy() (map[string][]map[string]string, *utils.APIHandleError) {
+	if n.nodecluster == nil {
+		return nil, utils.CreateAPIHandleError(400, fmt.Errorf("this node can not support this api"))
+	}
+	StatusMap := make(map[string][]map[string]string, 30)
+	nodes := n.nodecluster.GetAllNode()
+	for _, n := range nodes {
+		for _, v := range n.NodeStatus.Conditions {
+			status, ok := StatusMap[string(v.Type)]
+			if !ok {
+				StatusMap[string(v.Type)] = []map[string]string{map[string]string{"type": string(v.Type), "status": string(v.Status), "message": string(v.Message), "hostname": n.HostName}}
+			} else {
+				list := status
+				list = append(list, map[string]string{"type": string(v.Type), "status": string(v.Status), "message": string(v.Message), "hostname": n.HostName})
+				StatusMap[string(v.Type)] = list
+			}
+
+		}
+	}
+	return StatusMap, nil
 }
 
 //CordonNode set node is unscheduler
@@ -123,23 +183,32 @@ func (n *NodeService) CordonNode(nodeID string, unschedulable bool) *utils.APIHa
 	if apierr != nil {
 		return apierr
 	}
-	if !hostNode.Role.HasRule(model.ComputeNode) {
+	if !hostNode.Role.HasRule(client.ComputeNode) {
 		return utils.CreateAPIHandleError(400, fmt.Errorf("this node can not support this api"))
+	}
+	k8snode, err := n.kubecli.GetNode(hostNode.ID)
+	if err != nil {
+		logrus.Errorf("get k8s node(%s) error %s", hostNode.ID, err.Error())
+		return utils.CreateAPIHandleError(500, fmt.Errorf("get k8s node(%s) error %s", hostNode.ID, err.Error()))
 	}
 	//update k8s node unshcedulable status
 	hostNode.Unschedulable = unschedulable
 	//update node status
 	if unschedulable {
-		hostNode.Status = "unschedulable"
+		hostNode.Status = Running
+		hostNode.NodeStatus.Status = Running
+		hostNode.Unschedulable = true
 	} else {
-		hostNode.Status = "running"
+		hostNode.Status = Running
+		hostNode.NodeStatus.Status = Running
+		hostNode.Unschedulable = false
 	}
-	if hostNode.NodeStatus != nil {
-		node, err := k8s.CordonOrUnCordon(hostNode.ID, unschedulable)
+	if k8snode != nil {
+		node, err := n.kubecli.CordonOrUnCordon(hostNode.ID, unschedulable)
 		if err != nil {
 			return utils.CreateAPIHandleError(500, fmt.Errorf("set node schedulable info error,%s", err.Error()))
 		}
-		hostNode.NodeStatus = &node.Status
+		hostNode.UpdateK8sNodeStatus(*node)
 	}
 	n.nodecluster.UpdateNode(hostNode)
 	return nil
@@ -151,12 +220,12 @@ func (n *NodeService) PutNodeLabel(nodeID string, labels map[string]string) *uti
 	if apierr != nil {
 		return apierr
 	}
-	if hostNode.Role.HasRule(model.ComputeNode) && hostNode.NodeStatus != nil {
-		node, err := k8s.UpdateLabels(nodeID, labels)
+	if hostNode.Role.HasRule(client.ComputeNode) && hostNode.NodeStatus != nil {
+		node, err := n.kubecli.UpdateLabels(nodeID, labels)
 		if err != nil {
 			return utils.CreateAPIHandleError(500, fmt.Errorf("update k8s node labels error,%s", err.Error()))
 		}
-		hostNode.NodeStatus = &node.Status
+		hostNode.UpdateK8sNodeStatus(*node)
 	}
 	hostNode.Labels = labels
 	n.nodecluster.UpdateNode(hostNode)
@@ -164,39 +233,45 @@ func (n *NodeService) PutNodeLabel(nodeID string, labels map[string]string) *uti
 }
 
 //DownNode down node
-func (n *NodeService) DownNode(nodeID string) (*model.HostNode, *utils.APIHandleError) {
+func (n *NodeService) DownNode(nodeID string) (*client.HostNode, *utils.APIHandleError) {
 	hostNode, apierr := n.GetNode(nodeID)
 	if apierr != nil {
 		return nil, apierr
 	}
-	if !hostNode.Role.HasRule(model.ComputeNode) || hostNode.NodeStatus == nil {
-		return nil, utils.CreateAPIHandleError(400, fmt.Errorf("node is not k8s node or it not up"))
+	// add the node from k8s if type is compute
+	if hostNode.Role.HasRule(client.ComputeNode) || hostNode.NodeStatus == nil {
+		err := n.kubecli.DownK8sNode(hostNode.ID)
+		if err != nil {
+			logrus.Error("Failed to down node: ", err)
+			return nil, utils.CreateAPIHandleError(500, fmt.Errorf("k8s node down error,%s", err.Error()))
+		}
+
 	}
-	err := k8s.DeleteNode(hostNode.ID)
-	if err != nil {
-		return nil, utils.CreateAPIHandleError(500, fmt.Errorf("k8s node down error,%s", err.Error()))
-	}
-	hostNode.Status = "down"
-	hostNode.NodeStatus = nil
+	hostNode.Status = Offline
+	hostNode.NodeStatus.Status = Offline
 	n.nodecluster.UpdateNode(hostNode)
 	return hostNode, nil
 }
 
 //UpNode up node
-func (n *NodeService) UpNode(nodeID string) (*model.HostNode, *utils.APIHandleError) {
+func (n *NodeService) UpNode(nodeID string) (*client.HostNode, *utils.APIHandleError) {
 	hostNode, apierr := n.GetNode(nodeID)
 	if apierr != nil {
 		return nil, apierr
 	}
-	if !hostNode.Role.HasRule(model.ComputeNode) || hostNode.NodeStatus != nil {
-		return nil, utils.CreateAPIHandleError(400, fmt.Errorf("node is not k8s node or it not down"))
+	hostNode.Unschedulable = false
+	// add the node to k8s if type is compute
+	if hostNode.Role.HasRule(client.ComputeNode) {
+		if k8snode, _ := n.kubecli.GetNode(hostNode.ID); k8snode == nil {
+			node, err := n.kubecli.UpK8sNode(hostNode)
+			if err != nil {
+				return nil, utils.CreateAPIHandleError(500, fmt.Errorf("k8s node up error,%s", err.Error()))
+			}
+			hostNode.UpdateK8sNodeStatus(*node)
+		}
 	}
-	node, err := k8s.CreatK8sNodeFromRainbonNode(hostNode)
-	if err != nil {
-		return nil, utils.CreateAPIHandleError(500, fmt.Errorf("k8s node up error,%s", err.Error()))
-	}
-	hostNode.NodeStatus = &node.Status
-	hostNode.Status = "running"
+	hostNode.Status = Running
+	hostNode.NodeStatus.Status = Running
 	n.nodecluster.UpdateNode(hostNode)
 	return hostNode, nil
 }
@@ -225,15 +300,17 @@ func (n *NodeService) InstallNode(nodeID string) *utils.APIHandleError {
 			return err
 		}
 	}
-	node.Status = "installing"
+	node.Status = Installing
+	node.NodeStatus.Status = Installing
 	n.nodecluster.UpdateNode(node)
 	return nil
 }
 
 //InitStatus node init status
 func (n *NodeService) InitStatus(nodeIP string) (*model.InitStatus, *utils.APIHandleError) {
-	var hostnode model.HostNode
+	var hostnode client.HostNode
 	gotNode := false
+	var status model.InitStatus
 	i := 0
 	for !gotNode && i < 3 {
 		list, err := n.GetAllNode()
@@ -254,20 +331,21 @@ func (n *NodeService) InitStatus(nodeIP string) (*model.InitStatus, *utils.APIHa
 		i++
 	}
 	if i != 10 {
-		return nil, utils.CreateAPIHandleError(400, fmt.Errorf("can't find node with given ip %s", nodeIP))
+		status.Status = 3
+		status.StatusCN = "等待节点加入集群中"
+		return &status, nil
 	}
 	nodeUID := hostnode.ID
 	node, err := n.GetNode(nodeUID)
 	if err != nil {
 		return nil, err
 	}
-	var status model.InitStatus
-	for _, val := range node.Conditions {
-		if node.Alived || (val.Type == model.NodeInit && val.Status == model.ConditionTrue) {
+	for _, val := range node.NodeStatus.Conditions {
+		if node.Alived || (val.Type == client.NodeInit && val.Status == client.ConditionTrue) {
 			status.Status = 0
 			status.StatusCN = "初始化成功"
 			status.HostID = node.ID
-		} else if val.Type == model.NodeInit && val.Status == model.ConditionFalse {
+		} else if val.Type == client.NodeInit && val.Status == client.ConditionFalse {
 			status.Status = 1
 			status.StatusCN = fmt.Sprintf("初始化失败,%s", val.Message)
 		} else {
@@ -275,7 +353,7 @@ func (n *NodeService) InitStatus(nodeIP string) (*model.InitStatus, *utils.APIHa
 			status.StatusCN = "初始化中"
 		}
 	}
-	if len(node.Conditions) == 0 {
+	if len(node.NodeStatus.Conditions) == 0 {
 		status.Status = 2
 		status.StatusCN = "初始化中"
 	}
@@ -291,7 +369,7 @@ func (n *NodeService) GetNodeResource(nodeUID string) (*model.NodePodResource, *
 	if !node.Role.HasRule("compute") {
 		return nil, utils.CreateAPIHandleError(401, fmt.Errorf("node is not compute node"))
 	}
-	ps, error := k8s.GetPodsByNodeName(nodeUID)
+	ps, error := n.kubecli.GetPodsByNodes(nodeUID)
 	if error != nil {
 		return nil, utils.CreateAPIHandleError(404, err)
 	}
@@ -302,15 +380,31 @@ func (n *NodeService) GetNodeResource(nodeUID string) (*model.NodePodResource, *
 	var memLimit int64
 	var memRequest int64
 	for _, v := range ps {
-		lc := v.Spec.Containers[0].Resources.Limits.Cpu().MilliValue()
-		cpuLimit += lc
-		lm := v.Spec.Containers[0].Resources.Limits.Memory().Value()
-		memLimit += lm
-		//logrus.Infof("pod %s limit cpu is %s",v.Name,v.Spec.Containers[0].Resources.Limits.Cpu().MilliValue())
-		rc := v.Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
-		cpuRequest += rc
-		rm := v.Spec.Containers[0].Resources.Requests.Memory().Value()
-		memRequest += rm
+		for _, v := range v.Spec.Containers {
+			lc := v.Resources.Limits.Cpu().MilliValue()
+			cpuLimit += lc
+		}
+		for _, v := range v.Spec.Containers {
+			lm := v.Resources.Limits.Memory().Value()
+			memLimit += lm
+		}
+		for _, v := range v.Spec.Containers {
+			rc := v.Resources.Requests.Cpu().MilliValue()
+			cpuRequest += rc
+		}
+		for _, v := range v.Spec.Containers {
+			rm := v.Resources.Requests.Memory().Value()
+			memRequest += rm
+		}
+		//lc := v.Spec.Containers[0].Resources.Limits.Cpu().MilliValue()
+		//cpuLimit += lc
+		//lm := v.Spec.Containers[0].Resources.Limits.Memory().Value()
+		//memLimit += lm
+		////logrus.Infof("pod %s limit cpu is %s",v.Name,v.Spec.Containers[0].Resources.Limits.Cpu().MilliValue())
+		//rc := v.Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+		//cpuRequest += rc
+		//rm := v.Spec.Containers[0].Resources.Requests.Memory().Value()
+		//memRequest += rm
 	}
 	var res model.NodePodResource
 	res.CPULimits = cpuLimit
@@ -329,104 +423,8 @@ func (n *NodeService) GetNodeResource(nodeUID string) (*model.NodePodResource, *
 
 //CheckNode check node install status
 func (n *NodeService) CheckNode(nodeUID string) (*model.InstallStatus, *utils.APIHandleError) {
-	descMap := make(map[string]string)
-	descMap["check_compute_services"] = "检测计算节点所需服务"
-	//descMap["check_manage_base_services"] = "检测管理节点所需基础服务"
-	descMap["check_manage_services"] = "检测管理节点所需服务"
-	descMap["create_host_id_list"] = "API支持服务"
-	descMap["do_rbd_images"] = "拉取镜像"
-	descMap["install_acp_plugins"] = "安装好雨组件"
-	descMap["install_base_plugins"] = "安装基础组件"
-	descMap["install_compute_ready"] = "安装计算节点完成"
-	descMap["install_compute_ready_manage"] = "安装计算节点完成"
-	descMap["install_db"] = "安装数据库"
-	descMap["install_docker"] = "安装Docker"
-	descMap["install_docker_compute"] = "计算节点安装Docker"
-	descMap["install_k8s"] = "安装管理节点Kubernetes"
-	descMap["install_kubelet"] = "安装Kubelet"
-	descMap["install_kubelet_manage"] = "管理节点Kubelet"
-	descMap["install_manage_ready"] = "安装管理节点完成"
-	descMap["install_network"] = "安装网络服务"
-	descMap["install_network_compute"] = "计算节点安装网络服务"
-	descMap["install_plugins"] = "管理节点安装代理"
-	descMap["install_plugins_compute"] = "计算节点安装代理"
-	descMap["install_storage"] = "安装存储"
-	descMap["install_storage_client"] = "安装存储客户端"
-	descMap["install_webcli"] = "安装WebCli"
-	descMap["update_dns"] = "更新DNS"
-	descMap["update_dns_compute"] = "计算节点更新DNS"
-	descMap["update_entrance_services"] = "更新Entrance"
-	hostnode, err := n.GetNode(nodeUID)
-	if err != nil {
-		return nil, err
-	}
-	tasks, err := taskService.GetTasksByNode(hostnode)
-	if err != nil {
-		return nil, err
-	}
 
-	var final model.InstallStatus
-	var result []*model.ExecedTask
-	var installStatus = 1 //0 success 1 ing  2 failed
-	var statusCN = "安装中"  //0 success 1 ing  2 failed
-	successCount := 0
-	for _, v := range tasks {
-		var task model.ExecedTask
-		task.ID = v.ID
-		task.Desc = descMap[task.ID]
-		if taskStatus, ok := v.Status[nodeUID]; ok {
-			task.Status = strings.ToLower(taskStatus.Status)
-			task.CompleteStatus = taskStatus.CompleStatus
-			if strings.ToLower(task.Status) == "complete" && strings.ToLower(task.CompleteStatus) == "success" {
-				successCount++
-			}
-			if strings.ToLower(task.Status) == "parse task output error" {
-				task.Status = "failure"
-				logrus.Debugf("install failure")
-				for _, output := range v.OutPut {
-					if output.NodeID == nodeUID {
-						task.ErrorMsg = output.Body
-					}
-				}
-
-				installStatus = 2
-				hostnode.Status = "install_failed"
-				statusCN = "安装失败"
-			}
-			task.CompleteStatus = taskStatus.CompleStatus
-		} else {
-			if len(v.Scheduler.Status) == 0 {
-				task.Status = "wait"
-			} else {
-				if _, ok := v.Scheduler.Status[nodeUID]; ok {
-					task.Status = "wait"
-				} else {
-					task.Status = "N/A"
-				}
-			}
-		}
-		dealNext(&task, tasks)
-		dealDepend(&task, v)
-
-		result = append(result, &task)
-	}
-	//dealSeq(result)
-	logrus.Debugf("success task count is %v,total task count is %v", successCount, len(tasks))
-	if successCount == len(tasks) {
-		logrus.Debugf("install success")
-		installStatus = 0
-		statusCN = "安装成功"
-		hostnode.Status = "install_success"
-	}
-	final.Status = installStatus
-	final.StatusCN = statusCN
-	hostnode.Update()
-	sort.Sort(model.TaskResult(result))
-
-	final.Tasks = result
-	logrus.Infof("install status is %v", installStatus)
-	logrus.Infof("task info  is %v", result)
-	return &final, nil
+	return nil, nil
 }
 
 func dealNext(task *model.ExecedTask, tasks []*model.Task) {

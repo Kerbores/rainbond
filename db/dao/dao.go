@@ -44,7 +44,7 @@ type TenantDao interface {
 	GetTenantByEid(eid string) ([]*model.Tenants, error)
 	GetPagedTenants(offset, len int) ([]*model.Tenants, error)
 	GetTenantIDsByNames(names []string) ([]string, error)
-	GetTenantByUUIDIsExist(uuid string) (bool)
+	GetTenantByUUIDIsExist(uuid string) bool
 }
 
 //TenantDao tenant dao
@@ -69,13 +69,14 @@ type EventLogDao interface {
 	DeleteServiceEventLog(obj *model.EventLogMessage) error
 	GetAllServiceEventLog() ([]*model.EventLogMessage, error)
 	DeleteServiceEventLogByEventId(eventId string) error
-
 }
 
 //TenantServiceDao TenantServiceDao
 type TenantServiceDao interface {
 	Dao
 	GetServiceByID(serviceID string) (*model.TenantServices, error)
+	GetServiceByServiceAlias(serviceAlias string) (*model.TenantServices, error)
+	GetServiceByIDs(serviceIDs []string) ([]*model.TenantServices, error)
 	GetServiceAliasByIDs(uids []string) ([]*model.TenantServices, error)
 	GetServiceByTenantIDAndServiceAlias(tenantID, serviceName string) (*model.TenantServices, error)
 	SetTenantServiceStatus(serviceID, status string) error
@@ -338,7 +339,7 @@ type EventDao interface {
 	GetEventByEventID(eventID string) (*model.ServiceEvent, error)
 	GetEventByEventIDs(eventIDs []string) ([]*model.ServiceEvent, error)
 	GetEventByServiceID(serviceID string) ([]*model.ServiceEvent, error)
-	DelEventByServiceID(serviceID string) (error)
+	DelEventByServiceID(serviceID string) error
 }
 
 //VersionInfoDao VersionInfoDao
@@ -384,6 +385,7 @@ type NotificationEventDao interface {
 	GetNotificationEventByKind(kind, kindID string) ([]*model.NotificationEvent, error)
 	GetNotificationEventByTime(start, end time.Time) ([]*model.NotificationEvent, error)
 	GetNotificationEventNotHandle() ([]*model.NotificationEvent, error)
+	GetNotificationEventGrouping(start, end time.Time) ([]*model.NotificationEvent, error)
 }
 
 //AppBackupDao group app backup history

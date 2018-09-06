@@ -73,7 +73,7 @@ type AbnormalInfo struct {
 func (a AbnormalInfo) Hash() string {
 	hash := sha256.New()
 	hash.Write([]byte(a.ServiceID + a.ServiceAlias + a.PodName + a.ContainerName))
-	return string(hash.Sum(nil))
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 func (a AbnormalInfo) String() string {
 	return fmt.Sprintf("ServiceID: %s;ServiceAlias: %s;PodName: %s ; ContainerName: %s; Reason: %s; Message: %s",
@@ -271,13 +271,13 @@ func (c *CacheManager) addAbnormalInfo(ai *AbnormalInfo) {
 			c.oomInfos[ai.Hash()] = ai
 		}
 		db.GetManager().NotificationEventDao().AddModel(&model.NotificationEvent{
-			Kind:    "service",
-			KindID:  c.oomInfos[ai.Hash()].ServiceID,
-			Hash:    ai.Hash(),
-			Type:    "UnNormal",
-			Message: c.oomInfos[ai.Hash()].Message,
-			Reason:  "OOMKilled",
-			Count:   c.oomInfos[ai.Hash()].Count,
+			Kind:        "service",
+			KindID:      c.oomInfos[ai.Hash()].ServiceID,
+			Hash:        ai.Hash(),
+			Type:        "UnNormal",
+			Message:     c.oomInfos[ai.Hash()].Message,
+			Reason:      "OOMKilled",
+			Count:       c.oomInfos[ai.Hash()].Count,
 		})
 	default:
 		if oldai, ok := c.errorInfos[ai.Hash()]; ok && oldai != nil {
@@ -287,13 +287,13 @@ func (c *CacheManager) addAbnormalInfo(ai *AbnormalInfo) {
 			c.errorInfos[ai.Hash()] = ai
 		}
 		db.GetManager().NotificationEventDao().AddModel(&model.NotificationEvent{
-			Kind:    "service",
-			KindID:  c.errorInfos[ai.Hash()].ServiceID,
-			Hash:    ai.Hash(),
-			Type:    "UnNormal",
-			Message: c.errorInfos[ai.Hash()].Message,
-			Reason:  c.errorInfos[ai.Hash()].Reason,
-			Count:   c.errorInfos[ai.Hash()].Count,
+			Kind:        "service",
+			KindID:      c.errorInfos[ai.Hash()].ServiceID,
+			Hash:        ai.Hash(),
+			Type:        "UnNormal",
+			Message:     c.errorInfos[ai.Hash()].Message,
+			Reason:      c.errorInfos[ai.Hash()].Reason,
+			Count:       c.errorInfos[ai.Hash()].Count,
 		})
 	}
 

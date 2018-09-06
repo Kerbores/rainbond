@@ -121,13 +121,13 @@ func (c *EventDaoImpl) GetEventByServiceID(serviceID string) ([]*model.ServiceEv
 }
 
 //GetEventByServiceID delete event log
-func (c *EventDaoImpl) DelEventByServiceID(serviceID string) (error) {
-	var result  []*model.ServiceEvent
+func (c *EventDaoImpl) DelEventByServiceID(serviceID string) error {
+	var result []*model.ServiceEvent
 	isNoteExist := c.DB.Where("service_id=?", serviceID).Find(&result).RecordNotFound()
-	if isNoteExist{
+	if isNoteExist {
 		return nil
 	}
-	if err := c.DB.Where("service_id=?", serviceID).Delete(result).Error;err!= nil{
+	if err := c.DB.Where("service_id=?", serviceID).Delete(result).Error; err != nil {
 		return err
 	}
 	return nil
@@ -143,8 +143,9 @@ func (c *NotificationEventDaoImpl) AddModel(mo model.Interface) error {
 	result := mo.(*model.NotificationEvent)
 	result.LastTime = time.Now()
 	result.FirstTime = time.Now()
+	result.CreatedAt = time.Now()
 	var oldResult model.NotificationEvent
-	if ok := c.DB.Where("hash=?", result.Hash).Find(&oldResult).RecordNotFound(); ok {
+	if ok := c.DB.Where("hash = ?", result.Hash).Find(&oldResult).RecordNotFound(); ok {
 		if err := c.DB.Create(result).Error; err != nil {
 			return err
 		}
@@ -159,7 +160,7 @@ func (c *NotificationEventDaoImpl) AddModel(mo model.Interface) error {
 func (c *NotificationEventDaoImpl) UpdateModel(mo model.Interface) error {
 	result := mo.(*model.NotificationEvent)
 	var oldResult model.NotificationEvent
-	if ok := c.DB.Where("hash=?", result.Hash).Find(&oldResult).RecordNotFound(); !ok {
+	if ok := c.DB.Where("hash = ?", result.Hash).Find(&oldResult).RecordNotFound(); !ok {
 		result.FirstTime = oldResult.FirstTime
 		result.ID = oldResult.ID
 	}
@@ -182,7 +183,7 @@ func (c *NotificationEventDaoImpl) GetNotificationEventByKind(kind, kindID strin
 func (c *NotificationEventDaoImpl) GetNotificationEventByTime(start, end time.Time) ([]*model.NotificationEvent, error) {
 	var result []*model.NotificationEvent
 	if !start.IsZero() && !end.IsZero() {
-		if err := c.DB.Where("last_time>? and last_time<?", start, end).Find(&result).Order("last_time DESC").Error; err != nil {
+		if err := c.DB.Where("last_time>? and last_time<? and is_handle=?", start, end, 0).Find(&result).Order("last_time DESC").Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
 				return result, nil
 			}
@@ -190,7 +191,7 @@ func (c *NotificationEventDaoImpl) GetNotificationEventByTime(start, end time.Ti
 		}
 		return result, nil
 	}
-	if err := c.DB.Where("last_time<?", time.Now()).Find(&result).Order("last_time DESC").Error; err != nil {
+	if err := c.DB.Where("last_time<? and is_handle=?", time.Now(), 0).Find(&result).Order("last_time DESC").Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return result, nil
 		}

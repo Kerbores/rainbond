@@ -63,12 +63,17 @@ type Manager interface {
 	Monitor() []db.MonitorData
 	Scrape(ch chan<- prometheus.Metric, namespace, exporter, from string) error
 	Error() chan error
+	HealthCheck() map[string]string
 }
 
 //NewManager 存储管理器
 func NewManager(conf conf.EventStoreConf, log *logrus.Entry) (Manager, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-
+	// event log do not save in db,will save in file
+	// dbPlugin, err := db.NewManager(conf.DB, log)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	conf.DB.Type = "eventfile"
 	dbPlugin, err := db.NewManager(conf.DB, log)
 	if err != nil {
 		return nil, err
@@ -78,6 +83,7 @@ func NewManager(conf conf.EventStoreConf, log *logrus.Entry) (Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	storeManager := &storeManager{
 		cancel:                cancel,
 		context:               ctx,
@@ -128,11 +134,27 @@ type storeManager struct {
 	errChan                chan error
 }
 
+func (s *storeManager) HealthCheck() map[string]string {
+	receiveChan := len(s.receiveChan) == 300
+	pubChan := len(s.pubChan) == 300
+	subChan := len(s.subChan) == 300
+	dockerLogChan := len(s.dockerLogChan) == 2048
+	monitorMessageChan := len(s.monitorMessageChan) == 100
+	newmonitorMessageChan := len(s.newmonitorMessageChan) == 2048
+	if receiveChan || pubChan || subChan || dockerLogChan || monitorMessageChan || newmonitorMessageChan {
+		return map[string]string{"status": "unusual", "info": "channel blockage"}
+	}
+	return map[string]string{"status": "health", "info": "eventlog service health"}
+}
+
 //Scrape prometheue monitor metrics
 //step1: docker log monitor
 //step2: event message monitor
 //step3: monitor message monitor
+var healthStatus float64
+
 func (s *storeManager) Scrape(ch chan<- prometheus.Metric, namespace, exporter, from string) error {
+
 	s.dockerLogStore.Scrape(ch, namespace, exporter, from)
 	s.handleMessageStore.Scrape(ch, namespace, exporter, from)
 	s.monitorMessageStore.Scrape(ch, namespace, exporter, from)
@@ -141,9 +163,21 @@ func (s *storeManager) Scrape(ch chan<- prometheus.Metric, namespace, exporter, 
 		"the handle chan cache size.",
 		[]string{"from", "chan"}, nil,
 	)
+	var healthDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, exporter, "health_status"),
+		"health status.",
+		[]string{"service_name"}, nil,
+	)
+	healthInfo := s.HealthCheck()
+	if healthInfo["status"] == "health" {
+		healthStatus = 1
+	} else {
+		healthStatus = 0
+	}
 	ch <- prometheus.MustNewConstMetric(chanDesc, prometheus.GaugeValue, float64(len(s.dockerLogChan)), from, "container_log")
 	ch <- prometheus.MustNewConstMetric(chanDesc, prometheus.GaugeValue, float64(len(s.monitorMessageChan)), from, "monitor_message")
 	ch <- prometheus.MustNewConstMetric(chanDesc, prometheus.GaugeValue, float64(len(s.receiveChan)), from, "event_message")
+	ch <- prometheus.MustNewConstMetric(healthDesc, prometheus.GaugeValue, healthStatus, "eventlog")
 	return nil
 }
 
@@ -263,8 +297,10 @@ func (s *storeManager) cleanLog() {
 			logrus.Error("list log dir error, ", err.Error())
 		} else {
 			for _, fi := range files {
-				if err := s.deleteFile(fi); err != nil {
-					logrus.Errorf("delete log file %s error. %s", fi, err.Error())
+				if !strings.Contains(fi, "eventlog") {
+					if err := s.deleteFile(fi); err != nil {
+						logrus.Errorf("delete log file %s error. %s", fi, err.Error())
+					}
 				}
 			}
 		}

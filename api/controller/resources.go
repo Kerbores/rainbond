@@ -73,6 +73,25 @@ func (v2 *V2Routes) Show(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("v2 urls"))
 }
 
+// show health status
+func (v2 *V2Routes) Health(w http.ResponseWriter, r *http.Request) {
+	httputil.ReturnSuccess(r, w, map[string]string{"status": "health", "info": "api service health"})
+}
+
+func (v2 *V2Routes) AlertManagerWebHook(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("=======>webhook")
+	in, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		fmt.Println(err)
+		httputil.ReturnError(r, w, 400, "")
+		return
+	}
+	fmt.Println("=====>body")
+	fmt.Println(string(in))
+	httputil.ReturnSuccess(r, w, "")
+
+}
+
 //TenantStruct tenant struct
 type TenantStruct struct {
 	StatusCli *client.AppRuntimeSyncClient
@@ -516,7 +535,7 @@ func (t *TenantStruct) ServicesCount(w http.ResponseWriter, r *http.Request) {
 		}
 
 	}
-	serviceCount := map[string]int{"total":len(allStatus),"running":running,"closed":closed,"abnormal":abnormal}
+	serviceCount := map[string]int{"total": len(allStatus), "running": running, "closed": closed, "abnormal": abnormal}
 	httputil.ReturnSuccess(r, w, serviceCount)
 }
 
@@ -1607,9 +1626,11 @@ func (t *TenantStruct) Pods(w http.ResponseWriter, r *http.Request) {
 	pods, err := handler.GetServiceManager().GetPods(serviceID)
 	if err != nil {
 		if err.Error() == gorm.ErrRecordNotFound.Error() {
+			logrus.Error("record notfound:",err)
 			httputil.ReturnError(r, w, 404, fmt.Sprintf("get pods error, %v", err))
 			return
 		}
+		logrus.Error("get pods error:",err)
 		httputil.ReturnError(r, w, 500, fmt.Sprintf("get pods error, %v", err))
 		return
 	}

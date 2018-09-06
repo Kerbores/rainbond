@@ -19,6 +19,7 @@
 package handler
 
 import (
+
 	"context"
 	"fmt"
 	"os"
@@ -50,6 +51,8 @@ import (
 	"github.com/Sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/pkg/api/v1"
+	"net/http"
+	"encoding/json"
 )
 
 //ServiceAction service act
@@ -85,6 +88,7 @@ func (s *ServiceAction) ServiceBuild(tenantID, serviceID string, r *api_model.Bu
 		r.Body.Kind = "source"
 	}
 	switch r.Body.Kind {
+	//deprecated
 	case "source":
 		//源码构建
 		if err := s.sourceBuild(r, service); err != nil {
@@ -93,6 +97,7 @@ func (s *ServiceAction) ServiceBuild(tenantID, serviceID string, r *api_model.Bu
 		}
 		logger.Info("源码构建应用任务发送成功 ", map[string]string{"step": "source-service", "status": "starting"})
 		return nil
+		//deprecated
 	case "slug":
 		//源码构建的分享至云市安装回平台
 		if err := s.slugBuild(r, service); err != nil {
@@ -101,6 +106,7 @@ func (s *ServiceAction) ServiceBuild(tenantID, serviceID string, r *api_model.Bu
 		}
 		logger.Info("slug构建应用任务发送成功 ", map[string]string{"step": "source-service", "status": "starting"})
 		return nil
+		//deprecated
 	case "image":
 		//镜像构建
 		if err := s.imageBuild(r, service); err != nil {
@@ -109,6 +115,7 @@ func (s *ServiceAction) ServiceBuild(tenantID, serviceID string, r *api_model.Bu
 		}
 		logger.Info("镜像构建应用任务发送成功 ", map[string]string{"step": "image-service", "status": "starting"})
 		return nil
+		//deprecated
 	case "market":
 		//镜像构建分享至云市安装回平台
 		if err := s.marketBuild(r, service); err != nil {
@@ -600,10 +607,10 @@ func (s *ServiceAction) ServiceCreate(sc *api_model.ServiceStruct) error {
 			if volumn.HostPath == "" {
 				//step 1 设置主机目录
 				switch volumn.VolumeType {
-				//共享文件��储
+				//共享文件存储
 				case dbmodel.ShareFileVolumeType.String():
 					volumn.HostPath = fmt.Sprintf("%s/tenant/%s/service/%s%s", sharePath, sc.TenantID, volumn.ServiceID, volumn.VolumePath)
-				//本地文件存�����
+					//本地文件存储
 				case dbmodel.LocalVolumeType.String():
 					serviceType, err := db.GetManager().TenantServiceLabelDao().GetTenantServiceTypeLabel(volumn.ServiceID)
 					if err != nil {
@@ -727,6 +734,16 @@ func (s *ServiceAction) GetService(tenantID string) ([]*dbmodel.TenantServices, 
 		logrus.Errorf("get service by id error, %v, %v", services, err)
 		return nil, err
 	}
+	var serviceIDs []string
+	for _, s := range services {
+		serviceIDs = append(serviceIDs, s.ServiceID)
+	}
+	status := s.statusCli.GetStatuss(strings.Join(serviceIDs, ","))
+	for _, s := range services {
+		if status, ok := status[s.ServiceID]; ok {
+			s.CurStatus = status
+		}
+	}
 	return services, nil
 }
 
@@ -787,6 +804,11 @@ func (s *ServiceAction) GetTenantRes(uuid string) (*api_model.TenantResource, er
 			UsedMEM += serMap[k].ContainerMemory
 		}
 	}
+	disks := s.statusCli.GetAppsDisk(serviceIDs)
+	var value float64
+	for _, v := range disks {
+		value += v
+	}
 	var res api_model.TenantResource
 	res.UUID = uuid
 	res.Name = ""
@@ -795,6 +817,7 @@ func (s *ServiceAction) GetTenantRes(uuid string) (*api_model.TenantResource, er
 	res.AllocatedMEM = AllocatedMEM
 	res.UsedCPU = UsedCPU
 	res.UsedMEM = UsedMEM
+	res.UsedDisk = value
 	return &res, nil
 }
 
@@ -1510,7 +1533,7 @@ func (s *ServiceAction) VolumnVar(tsv *dbmodel.TenantServiceVolume, tenantID, ac
 			//共享文件存储
 			case dbmodel.ShareFileVolumeType.String():
 				tsv.HostPath = fmt.Sprintf("%s/tenant/%s/service/%s%s", sharePath, tenantID, tsv.ServiceID, tsv.VolumePath)
-			//本地文件存储
+				//本地文件存储
 			case dbmodel.LocalVolumeType.String():
 				serviceType, err := db.GetManager().TenantServiceLabelDao().GetTenantServiceTypeLabel(tsv.ServiceID)
 				if err != nil {
@@ -1744,13 +1767,103 @@ func (s *ServiceAction) CreateTenandIDAndName(eid string) (string, string, error
 	return uid, name, nil
 }
 
+type K8sPodInfo struct {
+	ServiceID string `json:"service_id"`
+	//部署资源的ID ,例如rc ,deploment, statefulset
+	ReplicationID   string                       `json:"rc_id"`
+	ReplicationType string                       `json:"rc_type"`
+	PodName         string                       `json:"pod_name"`
+	PodIP           string                       `json:"pod_ip"`
+	Container       map[string]map[string]string `json:"container"`
+}
+
 //GetPods get pods
-func (s *ServiceAction) GetPods(serviceID string) ([]*dbmodel.K8sPod, error) {
+func (s *ServiceAction) GetPods(serviceID string) ([]K8sPodInfo, error) {
+	var podsInfoList []K8sPodInfo
 	pods, err := db.GetManager().K8sPodDao().GetPodByService(serviceID)
 	if err != nil {
+		logrus.Error("GetPodByService Error:", err)
 		return nil, err
 	}
-	return pods, nil
+	logrus.Info("pods：", pods)
+	for _, v := range pods {
+		var podInfo K8sPodInfo
+		containerMemory := make(map[string]map[string]string, 10)
+		podInfo.ServiceID = v.ServiceID
+		podInfo.ReplicationID = v.ReplicationID
+		podInfo.ReplicationType = v.ReplicationType
+		podInfo.PodName = v.PodName
+		podInfo.PodIP = v.PodIP
+		memoryUsageQuery := fmt.Sprintf(`container_memory_usage_bytes{pod_name="%s"}`, v.PodName)
+		memoryUsageMap, _ := s.GetContainerMemory(memoryUsageQuery)
+		logrus.Info("memoryUsageMap", memoryUsageMap)
+		for k, val := range memoryUsageMap {
+			if _,ok := containerMemory[k];!ok{
+				containerMemory[k] = map[string]string{"memory_usage": val}
+			}
+		}
+		memorylimitQuery := fmt.Sprintf(`container_spec_memory_limit_bytes{pod_name="%s"}`, v.PodName)
+		memoryLimitMap, _ := s.GetContainerMemory(memorylimitQuery)
+		logrus.Info("memoryLimitMap", memoryLimitMap)
+		for k2, v2 := range memoryLimitMap {
+			if val, ok := containerMemory[k2]; ok {
+				val["memory_limit"] = v2
+			}
+		}
+		podInfo.Container = containerMemory
+		podsInfoList = append(podsInfoList, podInfo)
+
+	}
+	return podsInfoList, nil
+}
+
+// Use Prometheus to query memory resources
+func (s *ServiceAction) GetContainerMemory(query string) (map[string]string, error) {
+	memoryUsageMap := make(map[string]string, 10)
+	proxy := GetPrometheusProxy()
+	proQuery := strings.Replace(query, " ", "%20", -1)
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:9999/api/v1/query?query=%s", proQuery), nil)
+	if err != nil {
+		logrus.Error("create request prometheus api error ", err.Error())
+		return memoryUsageMap, nil
+	}
+	presult, err := proxy.Do(req)
+	if err != nil {
+		logrus.Error("do proxy request prometheus api error ", err.Error())
+		return memoryUsageMap, nil
+	}
+	if presult.Body != nil {
+		defer presult.Body.Close()
+		if presult.StatusCode != 200 {
+			logrus.Error("StatusCode:", presult.StatusCode, err)
+			return memoryUsageMap, nil
+		}
+		var qres QueryResult
+		err = json.NewDecoder(presult.Body).Decode(&qres)
+		if err == nil {
+			for _, re := range qres.Data.Result {
+				var containerName string
+				var valuesBytes string
+				if cname, ok := re["metric"].(map[string]interface{}); ok {
+					containerName = cname["container_name"].(string)
+				} else {
+					logrus.Info("metric decode error")
+				}
+				if val, ok := (re["value"]).([]interface{}); ok && len(val) == 2 {
+					valuesBytes = val[1].(string)
+				} else {
+					logrus.Info("value decode error")
+				}
+				memoryUsageMap[containerName] = valuesBytes
+			}
+			return memoryUsageMap, nil
+		} else {
+			logrus.Error("Deserialization failed")
+		}
+	} else {
+		logrus.Error("Body Is empty")
+	}
+	return memoryUsageMap, nil
 }
 
 //TransServieToDelete trans service info to delete table
